@@ -308,7 +308,7 @@ class ModelComparer:
 			cbar = plt.gca().collections[0].colorbar
 			cbar.set_label('Number of samples', labelpad=15)
 
-			plt.savefig(os.path.join('./output', f"{model_name}_confusion_matrix.png"))
+			plt.savefig(os.path.join('./images', f"{model_name}_confusion_matrix.png"))
 			plt.close()
 
 			print("\nDetailed metrics by class:")
