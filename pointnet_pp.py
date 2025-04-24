@@ -5,9 +5,11 @@ import torch.nn.functional as F
 def square_distance(src, dst):
 	"""
 	Calculate Euclideant distance between each two points.
-	src: source points, [B, N, C]
-	dst: target points, [B, M, C]
-	return dist: per-point square distance, [B, N, M]
+	Input:
+		src: source points, [B, N, C]
+		dst: target points, [B, M, C]
+	Return:
+		dist: per-point square distance, [B, N, M]
 	"""
 
 	return torch.cdist(src, dst, p=2) ** 2

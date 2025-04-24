@@ -6,6 +6,7 @@ class TNet(nn.Module):
 	def __init__(self, k=3):
 
 		super(TNet, self).__init__()
+
 		self.k = k
 		self.conv1 = nn.Conv1d(k, 64, 1)
 		self.conv2 = nn.Conv1d(64, 128, 1)
@@ -73,8 +74,6 @@ class PointNet(nn.Module):
 		self.relu = nn.ReLU()
 
 	def forward(self, x):
-
-		n_pts = x.size()[2]
 
 		trans = self.stn(x)
 		x = torch.bmm(x.transpose(2, 1), trans).transpose(2, 1)

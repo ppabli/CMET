@@ -19,12 +19,12 @@ from typing import List, Dict, Tuple, Any, Optional
 from easydict import EasyDict
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, accuracy_score
 
+from easydict import EasyDict
 from pcdet.config import cfg_from_yaml_file
 from pcdet.datasets import build_dataloader
-from pcdet.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_cpu
-
-from pointnet import PointNet
-from pointnet_pp import PointNetPlusPlus
+from pcdet.models import build_network, load_data_to_gpu
+from pcdet.utils import common_utils
+from typing import List, Dict, Tuple, Any, Optional
 
 class ModelComparer:
 	"""
@@ -35,13 +35,13 @@ class ModelComparer:
 	inference time, memory usage, and accuracy.
 	"""
 
-	def __init__(self, checkpoint_paths: List[str], dataset_path: str, class_names: List[str], device: str = 'cpu'):
+	def __init__(self, config_paths: List[str], checkpoint_paths: List[str], class_names: List[str], device: str = 'cpu'):
 		"""
 		Initialize the model benchmark.
 
 		Args:
 			checkpoint_paths: List of paths to model checkpoint files.
-			dataset_path: Path to the dataset for evaluation.
+
 			class_names: List of class names that the models should detect.
 			device: Device for inference ('cuda:0' or 'cpu').
 
@@ -52,85 +52,62 @@ class ModelComparer:
 		self.device = device
 
 		self.models = []
+		self.model_configs = []
 		self.model_names = []
 
-		self.dataset = None
-		self.dataloader = None
+		self.datasets = []
+		self.dataloaders = []
 
 		self.class_names = class_names
 
 		self.model_memory_footprints = []
 		self.benchmark_results = {}
 
-		dataset_config = cfg_from_yaml_file(
-			dataset_path,
-			EasyDict()
-		)
+		self.logger = common_utils.create_logger()
 
-		dataset, dataloader = self._initialize_dataset(dataset_config=dataset_config)
+		for config_path, checkpoint_path in zip(config_paths, checkpoint_paths):
 
-		self.dataset = dataset
-		self.dataloader = dataloader
+			self._load_model(config_path, checkpoint_path)
 
-		for checkpoint_path in checkpoint_paths:
-
-			self._load_model(checkpoint_path)
-
-	def _load_model(self, checkpoint_path: str) -> None:
+	def _load_model(self, config_path: str, checkpoint_path: str) -> None:
 		"""
 		Load a model from the specified configuration and checkpoint.
 
 		Args:
+			config_path: Path to the model configuration file.
 			checkpoint_path: Path to the model checkpoint file.
 		"""
 
 		tracemalloc.start()
 
-		model_name = os.path.basename(checkpoint_path).split('_')[0]
+		model_config = cfg_from_yaml_file(config_path, EasyDict())
 
+		dataset, dataloader = self._initialize_dataset(dataset_config=model_config.DATA_CONFIG)
+
+		model_name = os.path.basename(config_path).split('.')[0]
+
+		model = build_network(
+			model_cfg=model_config.MODEL,
+			num_class=len(model_config.CLASS_NAMES),
+			dataset=dataset
+		)
+
+		model.load_params_from_file(filename=checkpoint_path, logger=self.logger)
+
+		model.to(self.device)
+		model.eval()
+
+		_, peak_memory = tracemalloc.get_traced_memory()
+		tracemalloc.stop()
+
+		model_memory_footprint = peak_memory / (1024 * 1024)
+		self.model_memory_footprints.append(model_memory_footprint)
+
+		self.models.append(model)
+		self.model_configs.append(model_config)
 		self.model_names.append(model_name)
-
-		if model_name == 'pointnet':
-
-			tracemalloc.start()
-
-			new_model = PointNet(num_classes=len(self.class_names))
-
-			checkpoint = torch.load(checkpoint_path, map_location=self.device)
-			new_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-
-			new_model = new_model.to(self.device)
-			new_model.eval()
-
-			_, peak_memory = tracemalloc.get_traced_memory()
-			tracemalloc.stop()
-
-			self.model_memory_footprints.append(peak_memory / 10 ** 6)
-
-			self.models.append(new_model)
-
-		elif model_name == 'pointnetpp':
-
-			tracemalloc.start()
-
-			new_model = PointNetPlusPlus(num_classes=len(self.class_names))
-
-			checkpoint = torch.load(checkpoint_path, map_location=self.device)
-			new_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-
-			new_model = new_model.to(self.device)
-			new_model.eval()
-
-			_, peak_memory = tracemalloc.get_traced_memory()
-			tracemalloc.stop()
-
-			self.model_memory_footprints.append(peak_memory / 10 ** 6)
-
-			self.models.append(new_model)
-
-		else:
-
-			raise ValueError(f"Unsupported model type: {model_name}")
+		self.datasets.append(dataset)
+		self.dataloaders.append(dataloader)
 
 	def _initialize_dataset(self, dataset_config: Dict) -> Tuple[Any, Any]:
 		"""
@@ -168,6 +145,7 @@ class ModelComparer:
 
 		model = self.models[model_index]
 		model_name = self.model_names[model_index]
+		dataloader = self.dataloaders[model_index]
 
 		# Per scene metrics
 		inference_times = []
@@ -182,99 +160,50 @@ class ModelComparer:
 
 		print(f"\n===== Evaluating model: {model_name} =====")
 
-		for batch_idx, data_batch in enumerate(tqdm.tqdm(self.dataloader, desc=f"Evaluating {model_name}")):
+		for batch_idx, data_batch in enumerate(tqdm.tqdm(dataloader, desc=f"Evaluating {model_name}")):
 
 			try:
 
 				tracemalloc.start()
 
 				data_batch = copy.deepcopy(data_batch)
-				points = data_batch['points']
 
-				points = np.stack([
-					points[:, 1],  # X
-					points[:, 2],  # Y
-					points[:, 3],  # Z
-					points[:, 4],  # intensity
-				], axis=-1)
+				if self.device == 'cuda:0' and torch.cuda.is_available():
 
-				scene_times = []
-				item_pred_labels = []
-				item_gt_labels = []
+					load_data_to_gpu(data_batch)
 
-				points_tensor = torch.from_numpy(points[:, :3]).unsqueeze(0).float()
-				gt_boxes_tensor = torch.from_numpy(data_batch['gt_boxes']).float()[:, :, :7]
-
-				point_masks = points_in_boxes_cpu(points_tensor[0], gt_boxes_tensor[0])
-
-				for i, mask in enumerate(point_masks):
-
-					indices = mask.nonzero(as_tuple=False).squeeze(1)
-
-					if indices.numel() < 32:
-
-						continue
-
-					cluster_points = points[indices.numpy(), :3]
-
-					cluster_mean = np.mean(cluster_points, axis=0)
-					cluster_points = cluster_points - cluster_mean
-
-					max_abs = np.max(np.abs(cluster_points))
-					cluster_points = cluster_points / max_abs
-
-					if len(cluster_points) > 1024:
-
-						idx_choice = np.random.choice(len(cluster_points), 1024, replace=False)
-						cluster_points = cluster_points[idx_choice]
-
-					elif len(cluster_points) < 1024:
-
-						idx_choice = np.random.choice(len(cluster_points), 1024 - len(cluster_points), replace=True)
-						padding = cluster_points[idx_choice]
-						cluster_points = np.vstack([cluster_points, padding])
-
-					input_tensor = torch.FloatTensor(cluster_points).unsqueeze(0).transpose(1, 2).to(self.device)
-
-					start_time = time.time()
-
-					if model_name == 'pointnet':
-
-						batch_results, _ = model(input_tensor)
-
-					elif model_name == 'pointnetpp':
-
-						batch_results = model(input_tensor)
-
-					end_time = time.time()
-					scene_times.append(end_time - start_time)
-
-					_, predicted = torch.max(batch_results.data, 1)
-
-					label = int(data_batch['gt_boxes'][0, i, 7]) - 1
-
-					item_pred_labels.append(predicted.item())
-					item_gt_labels.append(label)
+				start_time = time.time()
+				prediction_dicts, _ = model.forward(data_batch)
+				end_time = time.time()
 
 				_, peak_memory = tracemalloc.get_traced_memory()
 				tracemalloc.stop()
 
-				if item_pred_labels:
+				gt_labels = [int(data_batch['gt_boxes'][0, i, 7]) - 1 for i in range(data_batch['gt_boxes'].shape[1])]
 
-					assert len(item_pred_labels) == len(item_gt_labels), "Mismatch in predicted and ground truth labels length."
+				pred_labels = prediction_dicts[0]['pred_labels'].cpu().numpy()
 
-					pred_results.append(np.array(item_pred_labels))
-					gt_results.append(np.array(item_gt_labels))
+				if len(pred_labels) < len(gt_labels):
 
-					memory_usage = peak_memory / 10 ** 6
+					continue
 
-					memory_usages.append(memory_usage)
-					inference_times.append(np.sum(scene_times))
+				pred_labels = pred_labels[:len(gt_labels)]
+				pred_labels = pred_labels - 1
 
-					per_object_memory_usages.append(memory_usage / len(item_gt_labels))
-					per_object_inference_times.append(np.mean(scene_times))
+				pred_results.append(np.array(pred_labels))
+				gt_results.append(np.array(gt_labels))
 
-				del data_batch
+				memory_usage = peak_memory / 10 ** 6
+
+				memory_usages.append(memory_usage)
+
+				inference_time = end_time - start_time
+				inference_times.append(inference_time)
+
+				per_object_memory_usages.append(memory_usage / len(gt_labels))
+				per_object_inference_times.append(inference_time / len(gt_labels))
+
+				del data_batch, prediction_dicts
 
 				gc.collect()
 
@@ -301,6 +230,8 @@ class ModelComparer:
 			return self._get_empty_metrics()
 
 		try:
+
+			assert len(pred_results) == len(gt_results), "Mismatch between predicted and ground truth results."
 
 			labels_true = np.concatenate(gt_results)
 			labels_pred = np.concatenate(pred_results)
@@ -344,7 +275,7 @@ class ModelComparer:
 			'inference_time_std_sec': np.std(inference_times),
 			'per_object_inference_time_mean_sec': np.mean(per_object_inference_times),
 			'per_object_inference_time_std_sec': np.std(per_object_inference_times),
-			'num_samples': len(self.dataloader),
+			'num_samples': len(dataloader),
 			'num_classes': len(self.class_names),
 			'model_memory_footprint_mb': self.model_memory_footprints[model_index],
 			'confusion_matrix': cm
@@ -449,7 +380,7 @@ class ModelComparer:
 
 			if output_dir:
 
-				results_path = os.path.join(output_dir, f"{model_name}_real_classification_results.csv")
+				results_path = os.path.join(output_dir, f"{model_name}_detection_classification_results.csv")
 				self._save_metrics_to_csv(self.benchmark_results[model_name], results_path)
 
 			if images_dir:
@@ -509,7 +440,7 @@ class ModelComparer:
 
 		with open(filepath, 'a', newline='') as csvfile:
 
-			fieldnames = [key for key in metrics_dict.keys() if key not in ['confusion_matrix']]
+			fieldnames = list(metrics_dict.keys())
 			writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
 			if os.path.getsize(filepath) == 0:
@@ -533,12 +464,14 @@ def main():
 	images_dir = './images'
 
 	openpcdet_path = '/media/pablo/Disco programas/datasets/openpcdet/OpenPCDet'
-	dataset_path = os.path.join(openpcdet_path, 'tools/cfgs/dataset_configs/kitti_dataset.yaml')
+	config_paths = [
+		os.path.join(openpcdet_path, "tools/cfgs/kitti_models/pointpillar.yaml"),
+		os.path.join(openpcdet_path, "tools/cfgs/kitti_models/pointrcnn.yaml"),
+	]
 
-	config_path = '/home/pablo/Desktop/pointnet/output/'
 	checkpoint_paths = [
-		os.path.join(config_path, "pointnet_best.pth"),
-		#os.path.join(config_path, "pointnetpp_best.pth"),
+		os.path.join(openpcdet_path, "weights/pointpillar_7728.pth"),
+		os.path.join(openpcdet_path, "weights/pointrcnn_7870.pth"),
 	]
 
 	os.makedirs(output_dir, exist_ok=True)
@@ -551,13 +484,13 @@ def main():
 		print(f"Output directory: {output_dir}")
 		print(f"Images directory: {images_dir}")
 		print(f"Target classes: {target_classes}")
-		print(f"Config paths: {None}")
+		print(f"Config paths: {config_paths}")
 		print(f"Checkpoint paths: {checkpoint_paths}")
 		print("============================")
 
 		benchmark = ModelComparer(
+			config_paths=config_paths,
 			checkpoint_paths=checkpoint_paths,
-			dataset_path=dataset_path,
 			class_names=target_classes,
 			device=device
 		)
