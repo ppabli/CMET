@@ -538,7 +538,7 @@ def main():
 	config_path = '/home/pablo/Desktop/pointnet/output/'
 	checkpoint_paths = [
 		os.path.join(config_path, "pointnet_best.pth"),
-		#os.path.join(config_path, "pointnetpp_best.pth"),
+		os.path.join(config_path, "pointnetpp_best.pth"),
 	]
 
 	os.makedirs(output_dir, exist_ok=True)
