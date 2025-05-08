@@ -1,1 +1,1 @@
-# METRIC - Model Evaluation Toolkit for Reliable and Informative Comparison
+# CMET - Classification Model Evaluation Toolkit
