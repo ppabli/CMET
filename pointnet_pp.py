@@ -119,7 +119,7 @@ class SetAbstraction(nn.Module):
 
 		if self.group_all:
 
-			new_xyz = torch.zeros(B, 1, C, device=xyz.device)
+			new_xyz = torch.mean(xyz, dim=1, keepdim=True)
 			grouped_xyz = xyz.unsqueeze(1)
 
 		else:

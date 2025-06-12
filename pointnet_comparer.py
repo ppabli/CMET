@@ -60,6 +60,7 @@ class ModelComparer:
 		self.class_names = class_names
 
 		self.model_memory_footprints = []
+		self.model_gpu_memory_footprints = []
 		self.benchmark_results = {}
 
 		dataset_config = cfg_from_yaml_file(
@@ -84,11 +85,14 @@ class ModelComparer:
 			checkpoint_path: Path to the model checkpoint file.
 		"""
 
-		tracemalloc.start()
-
 		model_name = os.path.basename(checkpoint_path).split('_')[0]
 
 		self.model_names.append(model_name)
+
+		if self.device.startswith('cuda') and torch.cuda.is_available():
+
+			torch.cuda.empty_cache()
+			torch.cuda.reset_peak_memory_stats()
 
 		if model_name == 'pointnet':
 
@@ -101,6 +105,16 @@ class ModelComparer:
 
 			new_model = new_model.to(self.device)
 			new_model.eval()
+
+			if self.device.startswith('cuda') and torch.cuda.is_available():
+
+				model_gpu_mem = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 2)
+
+			else:
+
+				model_gpu_mem = 0
+
+			self.model_gpu_memory_footprints.append(model_gpu_mem)
 
 			_, peak_memory = tracemalloc.get_traced_memory()
 			tracemalloc.stop()
@@ -120,6 +134,16 @@ class ModelComparer:
 
 			new_model = new_model.to(self.device)
 			new_model.eval()
+
+			if self.device.startswith('cuda') and torch.cuda.is_available():
+
+				model_gpu_mem = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 2)
+
+			else:
+
+				model_gpu_mem = 0
+
+			self.model_gpu_memory_footprints.append(model_gpu_mem)
 
 			_, peak_memory = tracemalloc.get_traced_memory()
 			tracemalloc.stop()
@@ -172,10 +196,12 @@ class ModelComparer:
 		# Per scene metrics
 		inference_times = []
 		memory_usages = []
+		gpu_memory_usages = []
 
 		# Per object metrics
 		per_object_inference_times = []
 		per_object_memory_usages = []
+		per_object_gpu_memory_usages = []
 
 		pred_results = []
 		gt_results = []
@@ -187,6 +213,11 @@ class ModelComparer:
 			try:
 
 				tracemalloc.start()
+
+				if self.device.startswith('cuda') and torch.cuda.is_available():
+
+					torch.cuda.reset_peak_memory_stats()
+					torch.cuda.empty_cache()
 
 				data_batch = copy.deepcopy(data_batch)
 				points = data_batch['points']
@@ -259,6 +290,17 @@ class ModelComparer:
 				_, peak_memory = tracemalloc.get_traced_memory()
 				tracemalloc.stop()
 
+				if self.device.startswith('cuda') and torch.cuda.is_available():
+
+					gpu_mem = torch.cuda.max_memory_allocated(device=self.device)
+					gpu_mem_mb = gpu_mem / (1024 ** 2)
+					gpu_memory_usages.append(gpu_mem_mb)
+
+				else:
+
+					gpu_mem_mb = 0
+					gpu_memory_usages.append(gpu_mem_mb)
+
 				if item_pred_labels:
 
 					assert len(item_pred_labels) == len(item_gt_labels), "Mismatch in predicted and ground truth labels length."
@@ -273,6 +315,7 @@ class ModelComparer:
 
 					per_object_memory_usages.append(memory_usage / len(item_gt_labels))
 					per_object_inference_times.append(np.mean(scene_times))
+					per_object_gpu_memory_usages.append(gpu_mem_mb / len(item_gt_labels))
 
 				del data_batch
 
@@ -338,8 +381,12 @@ class ModelComparer:
 			'f1_weighted': f1_weighted,
 			'memory_usage_mean_mb': np.mean(memory_usages),
 			'memory_usage_std_mb': np.std(memory_usages),
+			'gpu_memory_usage_mean_mb': np.mean(gpu_memory_usages),
+			'gpu_memory_usage_std_mb': np.std(gpu_memory_usages),
 			'per_object_memory_usage_mean_mb': np.mean(per_object_memory_usages),
 			'per_object_memory_usage_std_mb': np.std(per_object_memory_usages),
+			'per_object_gpu_memory_usage_mean_mb': np.mean(per_object_gpu_memory_usages),
+			'per_object_gpu_memory_usage_std_mb': np.std(per_object_gpu_memory_usages),
 			'inference_time_mean_sec': np.mean(inference_times),
 			'inference_time_std_sec': np.std(inference_times),
 			'per_object_inference_time_mean_sec': np.mean(per_object_inference_times),
@@ -347,14 +394,15 @@ class ModelComparer:
 			'num_samples': len(self.dataloader),
 			'num_classes': len(self.class_names),
 			'model_memory_footprint_mb': self.model_memory_footprints[model_index],
+			'model_gpu_memory_footprint_mb': self.model_gpu_memory_footprints[model_index],
 			'confusion_matrix': cm
 		}
 
 		for i, cls in enumerate(self.class_names):
 
-			performance_metrics[f'{cls.lower()}_precision'] = precision_by_class[i]
-			performance_metrics[f'{cls.lower()}_recall'] = recall_by_class[i]
-			performance_metrics[f'{cls.lower()}_f1'] = f1_by_class[i]
+			performance_metrics[f'{cls}_precision'] = precision_by_class[i]
+			performance_metrics[f'{cls}_recall'] = recall_by_class[i]
+			performance_metrics[f'{cls}_f1'] = f1_by_class[i]
 
 		self._print_evaluation_summary(model_name, performance_metrics)
 
@@ -376,8 +424,12 @@ class ModelComparer:
 			'f1_weighted': 0,
 			'memory_usage_mean_mb': 0,
 			'memory_usage_std_mb': 0,
+			'gpu_memory_usage_mean_mb': 0,
+			'gpu_memory_usage_std_mb': 0,
 			'per_object_memory_usage_mean_mb': 0,
 			'per_object_memory_usage_std_mb': 0,
+			'per_object_gpu_memory_usage_mean_mb': 0,
+			'per_object_gpu_memory_usage_std_mb': 0,
 			'inference_time_mean_sec': 0,
 			'inference_time_std_sec': 0,
 			'per_object_inference_time_mean_sec': 0,
@@ -385,14 +437,15 @@ class ModelComparer:
 			'num_samples': 0,
 			'num_classes': 0,
 			'model_memory_footprint_mb': 0,
+			'model_gpu_memory_footprint_mb': 0,
 			'confusion_matrix': None
 		}
 
 		for cls in self.class_names:
 
-			empty_metrics[f'{cls.lower()}_precision'] = 0
-			empty_metrics[f'{cls.lower()}_recall'] = 0
-			empty_metrics[f'{cls.lower()}_f1'] = 0
+			empty_metrics[f'{cls}_precision'] = 0
+			empty_metrics[f'{cls}_recall'] = 0
+			empty_metrics[f'{cls}_f1'] = 0
 
 		return empty_metrics
 
@@ -408,10 +461,13 @@ class ModelComparer:
 		print("\n===== Model Evaluation Summary =====")
 		print(f"Model: {model_name}")
 		print(f"Memory usage (MB): {metrics['memory_usage_mean_mb']:.4f} ± {metrics['memory_usage_std_mb']:.4f}")
+		print(f"GPU memory usage (MB): {metrics['gpu_memory_usage_mean_mb']:.4f} ± {metrics['gpu_memory_usage_std_mb']:.4f}")
 		print(f"Inference time (s): {metrics['inference_time_mean_sec']:.4f} ± {metrics['inference_time_std_sec']:.4f}")
 		print(f"Memory usage per object (MB): {metrics['per_object_memory_usage_mean_mb']:.4f} ± {metrics['per_object_memory_usage_std_mb']:.4f}")
+		print(f"GPU memory usage per object (MB): {metrics['per_object_gpu_memory_usage_mean_mb']:.4f} ± {metrics['per_object_gpu_memory_usage_std_mb']:.4f}")
 		print(f"Inference time per object (s): {metrics['per_object_inference_time_mean_sec']:.4f} ± {metrics['per_object_inference_time_std_sec']:.4f}")
 		print(f"Model memory footprint (MB): {metrics['model_memory_footprint_mb']:.4f}")
+		print(f"Model GPU memory footprint (MB): {metrics['model_gpu_memory_footprint_mb']:.4f}")
 		print(f"Number of samples: {metrics['num_samples']}")
 		print(f"Number of classes: {metrics['num_classes']}")
 		print(f"Accuracy: {metrics['accuracy']:.4f}")
@@ -532,10 +588,10 @@ def main():
 	output_dir = './output'
 	images_dir = './images'
 
-	openpcdet_path = '/media/pablo/Disco programas/datasets/openpcdet/OpenPCDet'
+	openpcdet_path = '.'
 	dataset_path = os.path.join(openpcdet_path, 'tools/cfgs/dataset_configs/kitti_dataset.yaml')
 
-	config_path = '/home/pablo/Desktop/pointnet/output/'
+	config_path = '.'
 	checkpoint_paths = [
 		os.path.join(config_path, "pointnet_best.pth"),
 		os.path.join(config_path, "pointnetpp_best.pth"),
