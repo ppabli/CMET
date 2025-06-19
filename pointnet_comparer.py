@@ -59,6 +59,7 @@ class ModelComparer:
 
 		self.class_names = class_names
 
+		self.model_transfer_times = []
 		self.model_memory_footprints = []
 		self.model_gpu_memory_footprints = []
 		self.benchmark_results = {}
@@ -103,12 +104,23 @@ class ModelComparer:
 			checkpoint = torch.load(checkpoint_path, map_location=self.device)
 			new_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 
-			new_model = new_model.to(self.device)
+			start_model_transfer = time.time()
+
+			new_model.to(self.device)
+
+			if self.device.startswith('cuda') and torch.cuda.is_available():
+
+				torch.cuda.synchronize()
+
+			end_model_transfer = time.time()
+
+			model_transfer_time = end_model_transfer - start_model_transfer
+
 			new_model.eval()
 
 			if self.device.startswith('cuda') and torch.cuda.is_available():
 
-				model_gpu_mem = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 2)
+				model_gpu_mem = torch.cuda.max_memory_allocated(device=self.device) / (1024 * 1024)
 
 			else:
 
@@ -119,7 +131,8 @@ class ModelComparer:
 			_, peak_memory = tracemalloc.get_traced_memory()
 			tracemalloc.stop()
 
-			self.model_memory_footprints.append(peak_memory / 10 ** 6)
+			self.model_memory_footprints.append(peak_memory / (1024 * 1024))
+			self.model_transfer_times.append(model_transfer_time)
 
 			self.models.append(new_model)
 
@@ -132,12 +145,23 @@ class ModelComparer:
 			checkpoint = torch.load(checkpoint_path, map_location=self.device)
 			new_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 
-			new_model = new_model.to(self.device)
+			start_model_transfer = time.time()
+
+			new_model.to(self.device)
+
+			if self.device.startswith('cuda') and torch.cuda.is_available():
+
+				torch.cuda.synchronize()
+
+			end_model_transfer = time.time()
+
+			model_transfer_time = end_model_transfer - start_model_transfer
+
 			new_model.eval()
 
 			if self.device.startswith('cuda') and torch.cuda.is_available():
 
-				model_gpu_mem = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 2)
+				model_gpu_mem = torch.cuda.max_memory_allocated(device=self.device) / (1024 * 1024)
 
 			else:
 
@@ -148,7 +172,8 @@ class ModelComparer:
 			_, peak_memory = tracemalloc.get_traced_memory()
 			tracemalloc.stop()
 
-			self.model_memory_footprints.append(peak_memory / 10 ** 6)
+			self.model_memory_footprints.append(peak_memory / (1024 * 1024))
+			self.model_transfer_times.append(model_transfer_time)
 
 			self.models.append(new_model)
 
@@ -195,11 +220,13 @@ class ModelComparer:
 
 		# Per scene metrics
 		inference_times = []
+		transfer_times = []
 		memory_usages = []
 		gpu_memory_usages = []
 
 		# Per object metrics
 		per_object_inference_times = []
+		per_object_transfer_times = []
 		per_object_memory_usages = []
 		per_object_gpu_memory_usages = []
 
@@ -230,6 +257,8 @@ class ModelComparer:
 				], axis=-1)
 
 				scene_times = []
+				scene_transfer_times = []
+
 				item_pred_labels = []
 				item_gt_labels = []
 
@@ -265,7 +294,15 @@ class ModelComparer:
 						padding = cluster_points[idx_choice]
 						cluster_points = np.vstack([cluster_points, padding])
 
+					start_transfer = time.time()
+
 					input_tensor = torch.FloatTensor(cluster_points).unsqueeze(0).transpose(1, 2).to(self.device)
+
+					if self.device.startswith('cuda') and torch.cuda.is_available():
+
+						torch.cuda.synchronize()
+
+					end_transfer = time.time()
 
 					start_time = time.time()
 
@@ -278,7 +315,9 @@ class ModelComparer:
 						batch_results = model(input_tensor)
 
 					end_time = time.time()
+
 					scene_times.append(end_time - start_time)
+					scene_transfer_times.append(end_transfer - start_transfer)
 
 					_, predicted = torch.max(batch_results.data, 1)
 
@@ -293,7 +332,7 @@ class ModelComparer:
 				if self.device.startswith('cuda') and torch.cuda.is_available():
 
 					gpu_mem = torch.cuda.max_memory_allocated(device=self.device)
-					gpu_mem_mb = gpu_mem / (1024 ** 2)
+					gpu_mem_mb = gpu_mem / (1024 * 1024)
 					gpu_memory_usages.append(gpu_mem_mb)
 
 				else:
@@ -308,14 +347,18 @@ class ModelComparer:
 					pred_results.append(np.array(item_pred_labels))
 					gt_results.append(np.array(item_gt_labels))
 
-					memory_usage = peak_memory / 10 ** 6
+					memory_usage = peak_memory / (1024 * 1024)
 
 					memory_usages.append(memory_usage)
+
 					inference_times.append(np.sum(scene_times))
+					transfer_times.append(np.sum(scene_transfer_times))
 
 					per_object_memory_usages.append(memory_usage / len(item_gt_labels))
-					per_object_inference_times.append(np.mean(scene_times))
 					per_object_gpu_memory_usages.append(gpu_mem_mb / len(item_gt_labels))
+
+					per_object_inference_times.append(np.mean(scene_times))
+					per_object_transfer_times.append(np.mean(scene_transfer_times))
 
 				del data_batch
 
@@ -389,12 +432,17 @@ class ModelComparer:
 			'per_object_gpu_memory_usage_std_mb': np.std(per_object_gpu_memory_usages),
 			'inference_time_mean_sec': np.mean(inference_times),
 			'inference_time_std_sec': np.std(inference_times),
+			'transfer_time_mean_sec': np.mean(transfer_times),
+			'transfer_time_std_sec': np.std(transfer_times),
 			'per_object_inference_time_mean_sec': np.mean(per_object_inference_times),
 			'per_object_inference_time_std_sec': np.std(per_object_inference_times),
+			'per_object_transfer_time_mean_sec': np.mean(per_object_transfer_times),
+			'per_object_transfer_time_std_sec': np.std(per_object_transfer_times),
 			'num_samples': len(self.dataloader),
 			'num_classes': len(self.class_names),
 			'model_memory_footprint_mb': self.model_memory_footprints[model_index],
 			'model_gpu_memory_footprint_mb': self.model_gpu_memory_footprints[model_index],
+			'model_transfer_time_sec': self.model_transfer_times[model_index],
 			'confusion_matrix': cm
 		}
 
@@ -434,10 +482,15 @@ class ModelComparer:
 			'inference_time_std_sec': 0,
 			'per_object_inference_time_mean_sec': 0,
 			'per_object_inference_time_std_sec': 0,
+			'transfer_time_mean_sec': 0,
+			'transfer_time_std_sec': 0,
+			'per_object_transfer_time_mean_sec': 0,
+			'per_object_transfer_time_std_sec': 0,
 			'num_samples': 0,
 			'num_classes': 0,
 			'model_memory_footprint_mb': 0,
 			'model_gpu_memory_footprint_mb': 0,
+			'model_transfer_time_sec': 0,
 			'confusion_matrix': None
 		}
 
@@ -463,11 +516,14 @@ class ModelComparer:
 		print(f"Memory usage (MB): {metrics['memory_usage_mean_mb']:.4f} ± {metrics['memory_usage_std_mb']:.4f}")
 		print(f"GPU memory usage (MB): {metrics['gpu_memory_usage_mean_mb']:.4f} ± {metrics['gpu_memory_usage_std_mb']:.4f}")
 		print(f"Inference time (s): {metrics['inference_time_mean_sec']:.4f} ± {metrics['inference_time_std_sec']:.4f}")
+		print(f"Transfer time (s): {metrics['transfer_time_mean_sec']:.4f} ± {metrics['transfer_time_std_sec']:.4f}")
 		print(f"Memory usage per object (MB): {metrics['per_object_memory_usage_mean_mb']:.4f} ± {metrics['per_object_memory_usage_std_mb']:.4f}")
 		print(f"GPU memory usage per object (MB): {metrics['per_object_gpu_memory_usage_mean_mb']:.4f} ± {metrics['per_object_gpu_memory_usage_std_mb']:.4f}")
 		print(f"Inference time per object (s): {metrics['per_object_inference_time_mean_sec']:.4f} ± {metrics['per_object_inference_time_std_sec']:.4f}")
+		print(f"Transfer time per object (s): {metrics['per_object_transfer_time_mean_sec']:.4f} ± {metrics['per_object_transfer_time_std_sec']:.4f}")
 		print(f"Model memory footprint (MB): {metrics['model_memory_footprint_mb']:.4f}")
 		print(f"Model GPU memory footprint (MB): {metrics['model_gpu_memory_footprint_mb']:.4f}")
+		print(f"Model transfer time (s): {metrics['model_transfer_time_sec']:.4f}")
 		print(f"Number of samples: {metrics['num_samples']}")
 		print(f"Number of classes: {metrics['num_classes']}")
 		print(f"Accuracy: {metrics['accuracy']:.4f}")
